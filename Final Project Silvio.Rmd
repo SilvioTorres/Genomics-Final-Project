@@ -1,0 +1,192 @@
+---
+title: "Final Project"
+output: html_notebook
+---
+
+## Install required packages
+
+```{r}
+# install required CRAN packages
+for (pkg in c("BiocManager", "data.table", "httr", "dendextend", "googledrive")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# install required Bioc packages
+for (pkg in c("limma", "edgeR", "GO.db", "org.Hs.eg.db","ReactomePA","DESeq2","KEGG","clusterProfiler","DOSE", "GEOquery", "AnnotationDbi")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, update = FALSE, ask = FALSE)
+  }
+}
+
+install.packages('R.utils')
+install.packages('dplyr')
+
+```
+```{r}
+
+library(data.table)
+library(dplyr)
+
+covid_counts <- "GSE150316_RawCounts_Final.txt.gz"
+
+rc_final <- data.frame(fread(covid_counts),
+                 row.names=1, stringsAsFactors = FALSE, check.names = FALSE)
+
+```
+
+#### Original Author took rc data and seperated only lung cases including 5 control samples 
+
+```{r}
+rc_lungs <- rc_final[ , grep("lung", colnames(rc_final))] #filtered for just lung samples
+rc_control <- rc_final[ , grep("Neg", colnames(rc_final))] # filtered for control samples
+
+rc_data <- merge(rc_lungs,rc_control, by = 0) # merged lung and controls into one data frame
+
+metameta <- t(rc_data)
+metameta <- metameta[-1,]
+metameta <- cbind(Row.names = rownames(metameta), metameta)
+metameta <- as.data.frame(metameta) # change matrix into data frame
+metameta <- metameta[c("Row.names")] #only take row names as metadata
+
+#rownames(meta_genes) <- meta_genes$Row.names #set row names to index
+rownames(rc_data) <- rc_data$Row.names #set row names as index
+#is.data.frame(meta_genes) #check that it hasn't become ASIS data
+#meta_genes <- meta_genes[c('Row.names')] #only take row names as metadata
+#is.data.frame(meta_genes) #check that it is still a data frame
+cols.dont.want <- "Row.names"
+rc_data <- rc_data[, ! names(rc_data) %in% cols.dont.want, drop = F]
+
+```
+
+```{r}
+metameta <- within(
+  metameta,
+  Control_Infected <- c("Control", "Lung")[1 + grepl('-lung', Row.names, ignore.case = TRUE)]
+)
+
+head(metameta)
+```
+
+
+```{r}
+```
+
+```{r}
+library(edgeR)
+
+dgelist_lung <- DGEList(
+  counts = rc_data,
+  group = NULL,
+  remove.zeros = TRUE,
+  samples = metameta,
+  genes = rownames(rc_data)
+)
+
+design <- model.matrix(~ Control_Infected, data=metameta)
+keep <- filterByExpr(dgelist_lung, design=design)
+dgelist_lung <- dgelist_lung[keep,,keep.lib.sizes=FALSE]
+dgelist_lung <- calcNormFactors(dgelist_lung, method="TMM")
+dgelist_lung <- estimateCommonDisp(dgelist_lung, verbose=TRUE)
+
+fit <- glmQLFit(dgelist_lung, design)
+qlf <- glmQLFTest(fit)
+toptags <- data.frame(topTags(qlf, n = Inf, p.value = .5))
+
+head(toptags)
+```
+```{r}
+# Volcano Plot 
+library(tidyverse)
+library(ggplot2)
+Volcano1 <- ggplot(data = toptags, aes(x = logFC, y = -log10(PValue))) +
+  geom_point() +
+  theme_minimal()
+Volcano1
+
+#Volcano2 <- Volcano1 +
+#    geom_hline(yintercept=-log10(0.05), col="red")
+#Volcano2
+
+#Volcano2 + scale_x_discrete(breaks = NULL)
+#Volcano2 + scale_y_discrete(breaks = NULL)
+
+```
+
+```{r}
+rc_data #main data
+metameta # metadata
+
+library(DESeq2)
+# constructing DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = rc_data,
+                       colData = metameta,
+                       design = ~ Control_Infected)
+
+#pre-filtering genes with low counts <10
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+# set factor level
+dds$Control_Infected <- relevel(dds$Control_Infected, ref = "Control")
+                       
+#Run our DESeq
+dds <- DESeq(dds)
+
+res <- results(dds)
+
+summary(res)
+
+res0.05 <- results(dds, alpha = 0.05)
+summary(res0.05)
+
+head(res)
+
+Volcanoseq1 <- with(res0.05, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,10), ylim=c(0,10))) +
+  geom_hline(yintercept=-log10(1), col="red")
+
+summary(res0.05)
+
+summary(res0.05)
+
+```
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+genes_to_test <- rownames(res0.05[res0.05$Log2FoldChange > 0.05])
+
+GO_resultsBP <- enrichGO(gene = genes_to_test, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "BP")
+GO_resultsMF <- enrichGO(gene = genes_to_test, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "MF")
+GO_resultsCC <- enrichGO(gene = genes_to_test, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL", ont = "CC")
+
+GoBP <- as.data.frame(GO_resultsBP)
+GoMF <- as.data.frame(GO_resultsMF)
+GoCC <- as.data.frame(GO_resultsCC)
+
+head(GoBP)
+head(GoMF)
+head(GoCC)
+
+
+matching <- merge(GoMF[1:10,], GoCC[1:10,], by = 'geneID')
+
+```
+```{r}
+
+toptags[toptags$logFC > 0,][1:10,]
+
+
+toptenCC <- GoCC[GoCC$pvalue < 0.05,][1:10,]
+toptenBP <- GoBP[GoBP$pvalue < 0.05,][1:10,]
+toptenMF <- GoMF[GoMF$pvalue < 0.05,][1:10,]
+
+
+toptenCCC <- subset(toptenCC, select=c('ID','pvalue','geneID'))
+toptenBPP <- subset(toptenBP, select=c('ID','pvalue','geneID'))
+toptenMFF <- subset(toptenMF, select=c('ID','pvalue','geneID'))
+
+
+```
